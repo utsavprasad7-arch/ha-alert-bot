@@ -4,8 +4,7 @@ on:
   schedule:
     # Runs 5 minutes after each 4H candle close (00:00, 04:00, 08:00,
     # 12:00, 16:00, 20:00 UTC), giving Binance a moment to finalize the candle.
-    - cron: "5 0,4,8,12,16,20 * * *"
-  # Lets you manually trigger a run from the GitHub Actions tab to test it.
+  - cron: "*/5 * * * *"  # Lets you manually trigger a run from the GitHub Actions tab to test it.
   workflow_dispatch:
 
 permissions:
