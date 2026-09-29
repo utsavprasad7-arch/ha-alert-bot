@@ -22,7 +22,7 @@ import requests
 # ---- Configuration ----------------------------------------------------
 
 SYMBOLS = ["ZECUSDT", "SOLUSDT"]
-INTERVAL = "1m"
+INTERVAL = "4h"
 KLINES_LIMIT = 100  # history needed to seed the HA recursion accurately
 BINANCE_URL = "https://data-api.binance.vision/api/v3/klines"
 
