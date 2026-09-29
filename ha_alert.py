@@ -3,11 +3,13 @@ Heikin Ashi 4H flip alert bot.
 
 Fetches candles from Binance's public API, computes Heikin Ashi values,
 and sends a Telegram push notification whenever the most recently CLOSED
-4H HA candle has a different color (green/red) than the one before it.
+4H HA candle has a different color (green/red) than the last color we
+successfully confirmed.
 
-State (which candle we've already alerted on) is stored in state.json so
-the same flip is never reported twice, even if this script runs more
-often than the candle interval.
+State only advances once Telegram confirms the message was delivered
+(HTTP 200 + "ok": true). If a send fails for any reason, the previous
+color stays recorded, so the very next run retries the same flip instead
+of silently losing it.
 """
 
 import json
@@ -20,7 +22,7 @@ import requests
 # ---- Configuration ----------------------------------------------------
 
 SYMBOLS = ["ZECUSDT", "SOLUSDT"]
-INTERVAL = "4h"
+INTERVAL = "1m"
 KLINES_LIMIT = 100  # history needed to seed the HA recursion accurately
 BINANCE_URL = "https://data-api.binance.vision/api/v3/klines"
 
@@ -47,8 +49,7 @@ def compute_heikin_ashi(klines):
     """
     Convert raw Binance klines into a list of Heikin Ashi candles.
     Each item: {open_time, ha_open, ha_close, color}
-    The LAST item in the input klines list is the still-forming candle,
-    so we compute HA for everything but treat the final one as "open".
+    The LAST item in the input klines list is the still-forming candle.
     """
     ha_candles = []
     prev_ha_open = None
@@ -98,15 +99,28 @@ def save_state(state):
 # ---- Telegram ---------------------------------------------------------------
 
 
-def send_telegram_message(text: str):
+def send_telegram_message(text: str) -> bool:
+    """Return True only if Telegram confirms delivery, so the caller can
+    decide whether it's safe to advance state."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID env vars.", file=sys.stderr)
-        return
+        return False
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}
-    resp = requests.post(url, data=payload, timeout=15)
+    try:
+        resp = requests.post(url, data=payload, timeout=15)
+    except Exception as e:
+        print(f"Telegram send raised an exception: {e}", file=sys.stderr)
+        return False
+
     if resp.status_code != 200:
         print(f"Telegram send failed: {resp.status_code} {resp.text}", file=sys.stderr)
+        return False
+
+    ok = resp.json().get("ok", False)
+    if not ok:
+        print(f"Telegram reported failure: {resp.text}", file=sys.stderr)
+    return ok
 
 
 # ---- Main -------------------------------------------------------------------
@@ -116,36 +130,65 @@ def check_symbol(symbol: str, state: dict):
     klines = fetch_klines(symbol)
     ha_candles = compute_heikin_ashi(klines)
 
-    # The last candle in the list is still forming (not closed yet), so we
-    # compare the two most recently CLOSED candles: index -2 and -3.
-    if len(ha_candles) < 3:
+    if len(ha_candles) < 2:
         print(f"{symbol}: not enough data yet.")
         return
 
+    # Last item is the still-forming candle; the one before it is the most
+    # recently CLOSED candle, which is what we judge color against.
     last_closed = ha_candles[-2]
-    prev_closed = ha_candles[-3]
 
-    last_notified_open_time = state.get(symbol, {}).get("last_notified_open_time")
+    sym_state = state.get(symbol, {})
+    last_confirmed_color = sym_state.get("last_confirmed_color")
+    last_confirmed_open_time = sym_state.get("last_confirmed_open_time")
 
-    flipped = last_closed["color"] != prev_closed["color"]
-    already_notified = last_notified_open_time == last_closed["open_time"]
+    # First run ever for this symbol: just record a baseline, no alert.
+    if last_confirmed_color is None:
+        print(f"{symbol}: first run, recording baseline color={last_closed['color']}")
+        state[symbol] = {
+            "last_confirmed_color": last_closed["color"],
+            "last_confirmed_open_time": last_closed["open_time"],
+        }
+        return
 
+    # Already confirmed this exact candle before (normal, no-op case).
+    if last_confirmed_open_time == last_closed["open_time"]:
+        print(f"{symbol}: last={last_closed['color']} flipped=False (already confirmed)")
+        return
+
+    flipped = last_closed["color"] != last_confirmed_color
     print(
-        f"{symbol}: prev={prev_closed['color']} last={last_closed['color']} "
-        f"flipped={flipped} already_notified={already_notified}"
+        f"{symbol}: prev_confirmed={last_confirmed_color} last={last_closed['color']} "
+        f"flipped={flipped}"
     )
 
-    if flipped and not already_notified:
-        emoji = "🟢" if last_closed["color"] == "green" else "🔴"
-        msg = (
-            f"{emoji} *{symbol}* Heikin Ashi flipped to *{last_closed['color'].upper()}* "
-            f"on the 4H timeframe.\n"
-            f"HA Open: {last_closed['ha_open']:.4f}\n"
-            f"HA Close: {last_closed['ha_close']:.4f}"
-        )
-        send_telegram_message(msg)
+    if not flipped:
+        # Color unchanged; just move the confirmed pointer forward to this candle.
+        state[symbol] = {
+            "last_confirmed_color": last_closed["color"],
+            "last_confirmed_open_time": last_closed["open_time"],
+        }
+        return
 
-    state[symbol] = {"last_notified_open_time": last_closed["open_time"]}
+    emoji = "🟢" if last_closed["color"] == "green" else "🔴"
+    msg = (
+        f"{emoji} *{symbol}* Heikin Ashi flipped to *{last_closed['color'].upper()}* "
+        f"on the 4H timeframe.\n"
+        f"HA Open: {last_closed['ha_open']:.4f}\n"
+        f"HA Close: {last_closed['ha_close']:.4f}"
+    )
+    sent_ok = send_telegram_message(msg)
+
+    if sent_ok:
+        state[symbol] = {
+            "last_confirmed_color": last_closed["color"],
+            "last_confirmed_open_time": last_closed["open_time"],
+        }
+        print(f"{symbol}: alert sent and confirmed.")
+    else:
+        # Do NOT advance state. Next run will see the same unresolved flip
+        # and try again, instead of losing it silently.
+        print(f"{symbol}: alert send FAILED, will retry next run.", file=sys.stderr)
 
 
 def main():
