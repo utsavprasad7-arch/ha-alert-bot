@@ -1,10 +1,10 @@
 {
   "ZECUSDT": {
-    "last_confirmed_color": "red",
-    "last_confirmed_open_time": 1791576000000
+    "last_confirmed_color": "green",
+    "last_confirmed_open_time": 1791590400000
   },
   "SOLUSDT": {
-    "last_confirmed_color": "red",
-    "last_confirmed_open_time": 1791576000000
+    "last_confirmed_color": "green",
+    "last_confirmed_open_time": 1791590400000
   }
 }
